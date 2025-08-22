@@ -5,11 +5,12 @@ metadata:
   name: mathsync
   namespace: mathsync
 
-# Common labels applied to all resources
-commonLabels:
-  app: mathsync
-  version: v1.0.0
-  environment: production
+# Common labels applied to all resources (updated from commonLabels)
+labels:
+- pairs:
+    app: mathsync
+    version: v1.0.0
+    environment: production
 
 # Common annotations
 commonAnnotations:
@@ -33,24 +34,12 @@ images:
 - name: mathsync
   newTag: latest
 
-# ConfigMap generator for environment-specific configs
-configMapGenerator:
-- name: mathsync-env-config
-  envs:
-  - .env.prod
-
 # Namespace for all resources
 namespace: mathsync
 
-# Patches for environment-specific customizations
-patchesStrategicMerge:
-- patches/production-patch.yaml
-
-# JSON patches for fine-grained modifications
-patchesJson6902:
-- target:
-    group: apps
-    version: v1
+# Patches (updated from deprecated patchesStrategicMerge and patchesJson6902)
+patches:
+- path: patches/production-patch.yaml
+  target:
     kind: Deployment
     name: mathsync-app
-  path: patches/replicas-patch.yaml

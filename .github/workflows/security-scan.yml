@@ -1,0 +1,200 @@
+name: 🔒 Security Scan
+
+on:
+  schedule:
+    # 毎日 02:00 UTC (11:00 JST)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'package*.json'
+      - 'Dockerfile'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: kaicyou2532/mathsync
+
+jobs:
+  # 依存関係の脆弱性スキャン
+  dependency-scan:
+    name: 🔍 Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.19.0'
+        cache: 'npm'
+
+    - name: 📦 Install dependencies
+      run: npm ci
+
+    - name: 🔍 Run npm audit
+      run: |
+        echo "## NPM Audit Results" > audit-report.md
+        echo "" >> audit-report.md
+        
+        if npm audit --json > audit.json; then
+          echo "✅ No vulnerabilities found" >> audit-report.md
+        else
+          echo "⚠️ Vulnerabilities detected:" >> audit-report.md
+          echo "" >> audit-report.md
+          npm audit >> audit-report.md
+        fi
+
+    - name: 🛡️ Snyk vulnerability scan
+      uses: snyk/actions/node@master
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=medium --json-file-output=snyk-report.json
+
+    - name: 📊 Upload vulnerability reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: vulnerability-reports
+        path: |
+          audit-report.md
+          audit.json
+          snyk-report.json
+        retention-days: 30
+
+  # Dockerイメージの脆弱性スキャン
+  container-scan:
+    name: 🐳 Container Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏗️ Build Docker image for scanning
+      run: |
+        docker build -t mathsync:scan .
+
+    - name: 🔍 Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'mathsync:scan'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 📊 Upload Trivy scan results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: 🔍 Run Trivy for JSON output
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'mathsync:scan'
+        format: 'json'
+        output: 'trivy-report.json'
+
+    - name: 📊 Upload container scan reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: container-scan-reports
+        path: |
+          trivy-results.sarif
+          trivy-report.json
+        retention-days: 30
+
+  # コードスキャン
+  code-scan:
+    name: 🔍 Code Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🔍 Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
+
+    - name: 🏗️ Autobuild
+      uses: github/codeql-action/autobuild@v3
+
+    - name: 🔍 Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # セキュリティレポート生成
+  security-report:
+    name: 📋 Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, container-scan, code-scan]
+    if: always()
+    
+    steps:
+    - name: 📥 Download all reports
+      uses: actions/download-artifact@v4
+      with:
+        path: reports/
+
+    - name: 📋 Generate security summary
+      run: |
+        echo "# 🔒 Security Scan Summary" > security-summary.md
+        echo "" >> security-summary.md
+        echo "**Scan Date:** $(date)" >> security-summary.md
+        echo "**Repository:** ${{ github.repository }}" >> security-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        echo "## 📊 Scan Results" >> security-summary.md
+        echo "" >> security-summary.md
+        echo "| Scan Type | Status |" >> security-summary.md
+        echo "|-----------|--------|" >> security-summary.md
+        echo "| 📦 Dependencies | ${{ needs.dependency-scan.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> security-summary.md
+        echo "| 🐳 Container | ${{ needs.container-scan.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> security-summary.md
+        echo "| 💻 Code | ${{ needs.code-scan.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        # 詳細レポートがあれば追加
+        if [ -f "reports/vulnerability-reports/audit-report.md" ]; then
+          echo "## 📦 Dependency Scan Details" >> security-summary.md
+          cat reports/vulnerability-reports/audit-report.md >> security-summary.md
+          echo "" >> security-summary.md
+        fi
+        
+        echo "---" >> security-summary.md
+        echo "*Generated by GitHub Actions Security Scan*" >> security-summary.md
+
+    - name: 📊 Upload security summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-summary
+        path: security-summary.md
+        retention-days: 90
+
+    - name: 📧 Send security alert (if issues found)
+      if: needs.dependency-scan.result == 'failure' || needs.container-scan.result == 'failure'
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "🚨 Security Issues Detected in MathSync"
+        body: |
+          Security vulnerabilities have been detected in the MathSync repository.
+          
+          Repository: ${{ github.repository }}
+          Commit: ${{ github.sha }}
+          Scan Date: $(date)
+          
+          Please review the security scan results and take appropriate action.
+          
+          View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        to: ${{ secrets.SECURITY_EMAIL }}
+        from: GitHub Security Scanner

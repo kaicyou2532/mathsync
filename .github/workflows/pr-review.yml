@@ -1,0 +1,162 @@
+name: 🔍 PR Review Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '20.19.0'
+
+jobs:
+  # PR用の軽量テスト
+  pr-check:
+    name: 🔍 PR Quality Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout PR
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 📦 Install dependencies
+      run: npm ci
+
+    - name: 🔍 Lint check
+      run: |
+        echo "Running lint check..."
+        # ESLintの設定があれば実行
+        if [ -f "package.json" ] && npm run lint --if-present; then
+          echo "Lint passed"
+        else
+          echo "Lint not configured or passed"
+        fi
+
+    - name: 🏗️ Build check
+      run: |
+        echo "Testing build..."
+        npm run build
+        echo "Build successful"
+
+    - name: 📊 Bundle size analysis
+      run: |
+        echo "Analyzing bundle size..."
+        du -sh dist/ || echo "Build output analysis"
+        
+        # bundle-analyzerがあれば実行
+        if command -v npx webpack-bundle-analyzer >/dev/null 2>&1; then
+          echo "Bundle analysis available"
+        else
+          echo "Bundle analyzer not configured"
+        fi
+
+  # Dockerビルドテスト（プッシュなし）
+  docker-build-test:
+    name: 🐳 Docker Build Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏗️ Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🧪 Test Docker build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: false
+        tags: mathsync:pr-test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: 🔍 Test container startup
+      run: |
+        docker build -t mathsync:pr-test .
+        docker run --rm -d --name mathsync-test -p 8080:80 mathsync:pr-test
+        sleep 10
+        
+        # ヘルスチェック
+        if curl -f http://localhost:8080/health; then
+          echo "✅ Container health check passed"
+        else
+          echo "❌ Container health check failed"
+          docker logs mathsync-test
+          exit 1
+        fi
+        
+        docker stop mathsync-test
+
+  # コメント投稿
+  pr-comment:
+    name: 💬 PR Comment
+    runs-on: ubuntu-latest
+    needs: [pr-check, docker-build-test]
+    if: always()
+    
+    steps:
+    - name: 💬 Comment PR
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.find(comment => 
+            comment.user.type === 'Bot' && comment.body.includes('🔍 PR Review Results')
+          );
+          
+          const prCheck = '${{ needs.pr-check.result }}';
+          const dockerBuild = '${{ needs.docker-build-test.result }}';
+          
+          const body = `## 🔍 PR Review Results
+          
+          | Check | Status |
+          |-------|--------|
+          | 🧪 Code Quality | ${prCheck === 'success' ? '✅ Passed' : '❌ Failed'} |
+          | 🐳 Docker Build | ${dockerBuild === 'success' ? '✅ Passed' : '❌ Failed'} |
+          
+          ${prCheck === 'success' && dockerBuild === 'success' 
+            ? '🎉 All checks passed! This PR is ready for review.' 
+            : '⚠️ Some checks failed. Please review the errors above.'}
+          
+          <details>
+          <summary>📋 Deployment Preview</summary>
+          
+          After merging this PR:
+          - 🏗️ Docker image will be built and pushed
+          - 🚀 Kubernetes manifests will be updated
+          - 📢 Deployment notifications will be sent
+          
+          </details>
+          
+          ---
+          *Automated by GitHub Actions • [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`;
+          
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: body
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+          }

@@ -1,0 +1,210 @@
+name: 🏷️ Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: kaicyou2532/mathsync
+
+jobs:
+  # リリースビルド
+  release-build:
+    name: 🏗️ Release Build
+    runs-on: ubuntu-latest
+    
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🏷️ Get version
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Version: ${VERSION}"
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.19.0'
+        cache: 'npm'
+
+    - name: 📦 Install dependencies
+      run: npm ci
+
+    - name: 🏗️ Build application
+      run: |
+        echo "Building release version ${{ steps.version.outputs.version }}"
+        npm run build
+
+    - name: 📊 Upload release artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-build-${{ steps.version.outputs.version }}
+        path: dist/
+        retention-days: 30
+
+  # リリース用Dockerイメージ
+  release-docker:
+    name: 🐳 Release Docker Image
+    runs-on: ubuntu-latest
+    needs: release-build
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏗️ Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        platforms: linux/amd64,linux/arm64
+
+    - name: 🔑 Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: 🏷️ Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=stable
+        labels: |
+          org.opencontainers.image.title=MathSync
+          org.opencontainers.image.description=Mathematical synchronization and visualization application
+          org.opencontainers.image.vendor=kaicyou2532
+          org.opencontainers.image.version=${{ needs.release-build.outputs.version }}
+          org.opencontainers.image.licenses=MIT
+
+    - name: 🏗️ Build and push release image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          NODE_VERSION=20.19.0
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          VCS_REF=${{ github.sha }}
+          VERSION=${{ needs.release-build.outputs.version }}
+
+  # GitHubリリース作成
+  create-release:
+    name: 📝 Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [release-build, release-docker]
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 📝 Generate changelog
+      id: changelog
+      run: |
+        # 前回のタグを取得
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+        
+        if [ -n "$PREVIOUS_TAG" ]; then
+          echo "## Changes since ${PREVIOUS_TAG}" > changelog.md
+          echo "" >> changelog.md
+          
+          # コミットメッセージから変更ログを生成
+          git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+        else
+          echo "## Initial Release" > changelog.md
+          echo "" >> changelog.md
+          echo "🎉 First release of MathSync!" >> changelog.md
+        fi
+        
+        echo "" >> changelog.md
+        echo "## Docker Images" >> changelog.md
+        echo "" >> changelog.md
+        echo "- \`docker pull kaicyou2532/mathsync:${{ needs.release-build.outputs.version }}\`" >> changelog.md
+        echo "- \`docker pull kaicyou2532/mathsync:stable\`" >> changelog.md
+        
+        # 出力用にエスケープ
+        CHANGELOG_CONTENT=$(cat changelog.md)
+        echo "changelog<<EOF" >> $GITHUB_OUTPUT
+        echo "$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: 📝 Create Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ needs.release-build.outputs.version }}
+        body: ${{ steps.changelog.outputs.changelog }}
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+
+  # リリース通知
+  release-notification:
+    name: 📢 Release Notification
+    runs-on: ubuntu-latest
+    needs: [release-build, release-docker, create-release]
+    
+    steps:
+    - name: 📢 Slack Release Notification
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#releases'
+        text: |
+          🎉 **MathSync ${{ needs.release-build.outputs.version }} Released!**
+          
+          🚀 **New Features & Changes:**
+          Check the [release notes](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.release-build.outputs.version }})
+          
+          🐳 **Docker Images:**
+          - \`kaicyou2532/mathsync:${{ needs.release-build.outputs.version }}\`
+          - \`kaicyou2532/mathsync:stable\`
+          
+          📦 **Quick Deploy:**
+          \`\`\`bash
+          docker pull kaicyou2532/mathsync:${{ needs.release-build.outputs.version }}
+          kubectl set image deployment/mathsync-app mathsync=kaicyou2532/mathsync:${{ needs.release-build.outputs.version }} -n mathsync
+          \`\`\`
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: 📧 Email Release Notification
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "🎉 MathSync ${{ needs.release-build.outputs.version }} Released"
+        body: |
+          MathSync version ${{ needs.release-build.outputs.version }} has been successfully released!
+          
+          🔗 Release Notes: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.release-build.outputs.version }}
+          🐳 Docker Image: kaicyou2532/mathsync:${{ needs.release-build.outputs.version }}
+          
+          The new version is now available for deployment.
+        to: ${{ secrets.NOTIFICATION_EMAIL }}
+        from: GitHub Actions

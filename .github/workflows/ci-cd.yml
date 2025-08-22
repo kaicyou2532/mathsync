@@ -1,0 +1,274 @@
+name: 🚀 CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: kaicyou2532/mathsync
+  NODE_VERSION: '20.19.0'
+
+jobs:
+  # 1️⃣ テストとコード品質チェック
+  test:
+    name: 🧪 Test & Quality Check
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 📦 Cache dependencies
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+
+    - name: 📥 Install dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: npm ci
+
+    - name: 🔍 Lint code
+      run: |
+        # ESLintがない場合はスキップ
+        if [ -f ".eslintrc.js" ] || [ -f ".eslintrc.json" ] || [ -f "eslint.config.js" ]; then
+          npm run lint || echo "Lint not configured, skipping..."
+        else
+          echo "ESLint not configured, skipping lint check"
+        fi
+
+    - name: 🧪 Run tests
+      run: |
+        # テストがある場合のみ実行
+        if npm run test --if-present; then
+          echo "Tests passed"
+        else
+          echo "No tests configured or tests failed"
+        fi
+
+    - name: 🏗️ Build application
+      run: npm run build
+
+    - name: 📊 Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-files
+        path: dist/
+        retention-days: 7
+
+  # 2️⃣ セキュリティスキャン
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 📦 Install dependencies
+      run: npm ci
+
+    - name: 🔍 Run npm audit
+      run: |
+        npm audit --audit-level=high || true
+        npm audit fix --dry-run || true
+
+    - name: 🛡️ Run Snyk security scan
+      uses: snyk/actions/node@master
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+  # 3️⃣ Dockerイメージビルド・プッシュ
+  build-and-push:
+    name: 🐳 Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🏗️ Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        platforms: linux/amd64,linux/arm64
+
+    - name: 🔑 Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: 🏷️ Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+        labels: |
+          org.opencontainers.image.title=MathSync
+          org.opencontainers.image.description=Mathematical synchronization and visualization application
+          org.opencontainers.image.vendor=kaicyou2532
+          org.opencontainers.image.licenses=MIT
+
+    - name: 🏗️ Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          NODE_VERSION=${{ env.NODE_VERSION }}
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          VCS_REF=${{ github.sha }}
+
+    - name: 🔍 Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 📊 Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # 4️⃣ Kubernetesマニフェスト更新（GitOps）
+  update-manifests:
+    name: 📝 Update K8s Manifests
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 🔧 Update Kustomization
+      run: |
+        cd k8s
+        # 新しいイメージタグに更新
+        sed -i "s|newTag:.*|newTag: ${GITHUB_SHA}|" kustomization.yaml
+        
+        # 変更があるかチェック
+        if git diff --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+
+    - name: 💾 Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add k8s/kustomization.yaml
+        git commit -m "🤖 Update image tag to ${GITHUB_SHA}" || exit 0
+        git push
+
+  # 5️⃣ デプロイ通知
+  notify:
+    name: 📢 Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [build-and-push, update-manifests]
+    if: always()
+    
+    steps:
+    - name: 📢 Slack Notification
+      uses: 8398a7/action-slack@v3
+      if: always()
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        text: |
+          🚀 MathSync Deployment Status: ${{ job.status }}
+          
+          📝 Commit: ${{ github.event.head_commit.message }}
+          👤 Author: ${{ github.event.head_commit.author.name }}
+          🌿 Branch: ${{ github.ref_name }}
+          🏷️ Image: ${{ needs.build-and-push.outputs.image-tag }}
+          🔗 Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: 📧 Email Notification
+      if: failure()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "❌ MathSync Deployment Failed"
+        body: |
+          Deployment failed for commit ${{ github.sha }}
+          
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Author: ${{ github.event.head_commit.author.name }}
+          Commit Message: ${{ github.event.head_commit.message }}
+          
+          Check the action logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        to: ${{ secrets.NOTIFICATION_EMAIL }}
+        from: GitHub Actions

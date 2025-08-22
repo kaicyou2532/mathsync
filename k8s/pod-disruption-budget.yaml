@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mathsync-pdb
+  namespace: mathsync
+  labels:
+    app: mathsync
+spec:
+  selector:
+    matchLabels:
+      app: mathsync
+      component: frontend
+  
+  # Ensure at least 2 pods are always available
+  minAvailable: 2
+  
+  # Alternative: maxUnavailable: 1
+  # This would allow only 1 pod to be unavailable at a time
+---

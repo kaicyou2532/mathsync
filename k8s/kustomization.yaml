@@ -1,0 +1,56 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: mathsync
+  namespace: mathsync
+
+# Common labels applied to all resources
+commonLabels:
+  app: mathsync
+  version: v1.0.0
+  environment: production
+
+# Common annotations
+commonAnnotations:
+  managed-by: kustomize
+  deployment-date: "2025-01-22"
+
+# Resources to include
+resources:
+- namespace.yaml
+- configmap.yaml
+- deployment.yaml
+- service.yaml
+- ingress.yaml
+- hpa.yaml
+- network-policy.yaml
+- pod-disruption-budget.yaml
+- service-monitor.yaml
+
+# Image transformation
+images:
+- name: mathsync
+  newTag: latest
+
+# ConfigMap generator for environment-specific configs
+configMapGenerator:
+- name: mathsync-env-config
+  envs:
+  - .env.prod
+
+# Namespace for all resources
+namespace: mathsync
+
+# Patches for environment-specific customizations
+patchesStrategicMerge:
+- patches/production-patch.yaml
+
+# JSON patches for fine-grained modifications
+patchesJson6902:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: mathsync-app
+  path: patches/replicas-patch.yaml

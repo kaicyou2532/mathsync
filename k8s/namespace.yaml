@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mathsync
+  labels:
+    name: mathsync
+    app: mathsync
+---

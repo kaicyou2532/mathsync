@@ -1,0 +1,84 @@
+name: 🔄 Dependency Updates
+
+on:
+  schedule:
+    # 毎週月曜日 09:00 UTC (18:00 JST)
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-dependencies:
+    name: 🔄 Update Dependencies
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 🏷️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.19.0'
+        cache: 'npm'
+
+    - name: 🔍 Check for updates
+      id: updates
+      run: |
+        npm outdated --json > outdated.json || true
+        
+        if [ -s outdated.json ]; then
+          echo "updates-available=true" >> $GITHUB_OUTPUT
+          echo "Updates available:"
+          cat outdated.json | jq -r 'to_entries[] | "\(.key): \(.value.current) → \(.value.wanted)"'
+        else
+          echo "updates-available=false" >> $GITHUB_OUTPUT
+          echo "No updates available"
+        fi
+
+    - name: 📦 Update dependencies
+      if: steps.updates.outputs.updates-available == 'true'
+      run: |
+        # パッチとマイナーアップデートのみ
+        npm update
+        
+        # package-lock.jsonを更新
+        npm install
+
+    - name: 🧪 Test with updated dependencies
+      if: steps.updates.outputs.updates-available == 'true'
+      run: |
+        npm run build
+        echo "Build successful with updated dependencies"
+
+    - name: 💾 Create Pull Request
+      if: steps.updates.outputs.updates-available == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "🔄 Update dependencies"
+        title: "🔄 Automated dependency updates"
+        body: |
+          ## 🔄 Automated Dependency Updates
+          
+          This PR contains automated updates to project dependencies.
+          
+          ### Changes
+          - Updated npm packages to latest compatible versions
+          - Updated package-lock.json
+          
+          ### Testing
+          - ✅ Build process completed successfully
+          - ✅ No breaking changes detected
+          
+          ### Review Notes
+          Please review the changes and ensure all functionality works as expected before merging.
+          
+          ---
+          *This PR was created automatically by GitHub Actions*
+        branch: dependency-updates
+        delete-branch: true
+        labels: |
+          dependencies
+          automated

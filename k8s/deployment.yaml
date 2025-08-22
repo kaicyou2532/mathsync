@@ -15,13 +15,13 @@ spec:
       maxUnavailable: 1
   selector:
     matchLabels:
-      app: mathsync
-      component: frontend
+      app.kubernetes.io/name: mathsync
+      app.kubernetes.io/component: frontend
   template:
     metadata:
       labels:
-        app: mathsync
-        component: frontend
+        app.kubernetes.io/name: mathsync
+        app.kubernetes.io/component: frontend
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "80"

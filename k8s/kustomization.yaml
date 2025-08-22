@@ -3,19 +3,6 @@ kind: Kustomization
 
 metadata:
   name: mathsync
-  namespace: mathsync
-
-# Common labels applied to all resources (updated from commonLabels)
-labels:
-- pairs:
-    app: mathsync
-    version: v1.0.0
-    environment: production
-
-# Common annotations
-commonAnnotations:
-  managed-by: kustomize
-  deployment-date: "2025-01-22"
 
 # Resources to include
 resources:
@@ -27,7 +14,8 @@ resources:
 - hpa.yaml
 - network-policy.yaml
 - pod-disruption-budget.yaml
-- service-monitor.yaml
+# ServiceMonitorはPrometheus Operatorがインストールされている場合のみ有効
+# - service-monitor.yaml
 
 # Image transformation
 images:
@@ -37,9 +25,43 @@ images:
 # Namespace for all resources
 namespace: mathsync
 
-# Patches (updated from deprecated patchesStrategicMerge and patchesJson6902)
+# Labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: mathsync
+  app.kubernetes.io/component: frontend
+  app.kubernetes.io/version: v1.0.0
+  app.kubernetes.io/managed-by: argocd
+
+# Common annotations
+commonAnnotations:
+  managed-by: argocd
+  deployment-date: "2025-08-23"
+
+# Patches for production environment
 patches:
-- path: patches/production-patch.yaml
+- patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: mathsync-app
+    spec:
+      replicas: 3
+      template:
+        spec:
+          containers:
+          - name: mathsync
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "1Gi"
+                cpu: "1000m"
+            env:
+            - name: NODE_ENV
+              value: "production"
+            - name: LOG_LEVEL
+              value: "info"
   target:
     kind: Deployment
     name: mathsync-app

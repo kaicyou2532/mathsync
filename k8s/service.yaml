@@ -17,7 +17,7 @@ spec:
     protocol: TCP
     name: http
   selector:
-    app: mathsync
-    component: frontend
+    app.kubernetes.io/name: mathsync
+    app.kubernetes.io/component: frontend
   sessionAffinity: None
 ---
